@@ -72,6 +72,11 @@
         .filter((p) => p.id);
     },
 
+    async listar(ctx) {
+      const r = await ctx.consultar(this.urlsLista(ctx.org));
+      return { fuente: r.url, items: this.normalizarLista(r.data) };
+    },
+
     async cargar(ctx, item) {
       const org = ctx.org;
       const base = `/api/organizations/${org}/projects/${item.id}`;
@@ -175,6 +180,11 @@
           };
         })
         .filter((s) => s.id);
+    },
+
+    async listar(ctx) {
+      const r = await ctx.consultar(this.urlsLista(ctx.org));
+      return { fuente: r.url, items: this.normalizarLista(r.data) };
     },
 
     async cargar(ctx, item) {

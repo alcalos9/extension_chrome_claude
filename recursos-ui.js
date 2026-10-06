@@ -108,9 +108,9 @@ async function listarProyectos() {
   setEstado('Consultando tus proyectos…');
   try {
     const ctx = await contexto();
-    const r = await ctx.consultar(Recursos.proyectos.urlsLista(ctx.org));
-    rec.proyectos = Recursos.proyectos.normalizarLista(r.data);
-    log(`Proyectos: ${rec.proyectos.length} (fuente: ${r.url.split('?')[0]}).`);
+    const r = await Recursos.proyectos.listar(ctx);
+    rec.proyectos = r.items;
+    log(`Proyectos: ${rec.proyectos.length} (fuente: ${r.fuente.split('?')[0]}).`);
     renderSeleccion($('lista-proyectos'), rec.proyectos);
     $('btn-exportar-proyectos').hidden = !rec.proyectos.length;
     setEstado(rec.proyectos.length ? `${rec.proyectos.length} proyecto(s) encontrados.` : 'No se encontraron proyectos.');
@@ -214,9 +214,9 @@ async function listarSkills() {
   setEstado('Consultando tus skills…');
   try {
     const ctx = await contexto();
-    const r = await ctx.consultar(Recursos.skills.urlsLista(ctx.org));
-    rec.skills = Recursos.skills.normalizarLista(r.data);
-    log(`Skills: ${rec.skills.length} (fuente: ${r.url.split('?')[0]}).`);
+    const r = await Recursos.skills.listar(ctx);
+    rec.skills = r.items;
+    log(`Skills: ${rec.skills.length} (fuente: ${r.fuente.split('?')[0]}).`);
     renderSeleccion($('lista-skills'), rec.skills, { conTipo: true });
     $('btn-exportar-skills').hidden = !rec.skills.length;
     setEstado(rec.skills.length ? `${rec.skills.length} skill(s) encontrados.` : 'No se encontraron skills.');
