@@ -73,4 +73,14 @@ const dom = Core.normalizarDom({ titulo: 'T', mensajes: [
 assert.strictEqual(dom.mensajes[0].adjuntos.length, 2);
 assert.strictEqual(dom.mensajes[1].rol, 'Claude');
 
+const LARGO = 'x'.repeat(20000) + 'FIN';
+const convLargo = Core.normalizarApi({ uuid: 'c', name: 'L', chat_messages: [
+  { uuid: 'a', index: 0, sender: 'human', content: [{ type: 'text', text: LARGO }] },
+  { uuid: 'b', index: 1, sender: 'assistant', parent_message_uuid: 'a', content: [
+    { type: 'tool_result', name: 't', content: LARGO }, { type: 'text', text: LARGO }] }] });
+assert.strictEqual(convLargo.mensajes[0].texto, LARGO, 'el texto del usuario no se recorta');
+assert.strictEqual(convLargo.mensajes[1].texto, LARGO, 'el texto de Claude no se recorta');
+const mdLargo = Core.construirMarkdown(convLargo, { incluirRazonamiento: true });
+assert.strictEqual(mdLargo.split(LARGO).length - 1, 3, 'el Markdown incluye íntegros mensajes y resultados de herramientas');
+
 console.log('core.test.js: OK');
