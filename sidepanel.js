@@ -1,0 +1,315 @@
+'use strict';
+
+const VERSION = '2.0.0';
+const $ = (id) => document.getElementById(id);
+
+const estado = { conv: null, tabId: null, origen: 'https://claude.ai', robot: [] };
+
+// ---------- utilidades de UI ----------
+
+function log(msg) {
+  $('log').textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+}
+
+function setEstado(msg, esError = false) {
+  const el = $('estado');
+  el.textContent = msg;
+  el.classList.toggle('error', esError);
+}
+
+function setProgreso(hecho, total) {
+  const p = $('progreso');
+  if (total == null) { p.hidden = true; return; }
+  p.hidden = false;
+  if (total === 0) { p.removeAttribute('value'); return; }
+  p.max = total;
+  p.value = hecho;
+}
+
+function ocupado(si) {
+  for (const id of ['btn-capturar', 'btn-robot', 'btn-exportar']) $(id).disabled = si;
+}
+
+// ---------- puente con la página ----------
+
+async function tabActiva() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tab;
+}
+
+// Ejecuta una función de page-lib.js en la pestaña y devuelve su valor (o lanza su error).
+async function enPagina(tabId, nombre, ...args) {
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (fn, a) => {
+      try {
+        return { ok: true, valor: await globalThis.__EXPORTAR_CLAUDE__[fn](...a) };
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) };
+      }
+    },
+    args: [nombre, args],
+  });
+  if (!res || !res.result) throw new Error('La página no respondió (¿se recargó o cambió de pestaña?).');
+  if (!res.result.ok) throw new Error(res.result.error);
+  return res.result.valor;
+}
+
+async function b64ABlob(b64, tipo) {
+  const r = await fetch(`data:${tipo || 'application/octet-stream'};base64,${b64}`);
+  return r.blob();
+}
+
+// Primero desde la página (cookies de sesión garantizadas); si falla, desde la extensión.
+async function descargarActivo(tabId, candidatas, permitirHtml) {
+  const errores = [];
+  for (const c of candidatas) {
+    let blob = null;
+    try {
+      const r = await enPagina(tabId, 'fetchBinary', c.url);
+      if (r.ok) blob = await b64ABlob(r.b64, r.type);
+      else errores.push(r.error);
+    } catch (e) { errores.push(e.message); }
+
+    if (!blob) {
+      try {
+        const res = await fetch(c.url, { credentials: 'include' });
+        if (res.ok) blob = await res.blob(); else errores.push(`HTTP ${res.status}`);
+      } catch (e) { errores.push(e.message); }
+    }
+
+    if (blob && !permitirHtml && /text\/html/i.test(blob.type)) {
+      errores.push('la respuesta era HTML (¿sesión caducada?)');
+      continue;
+    }
+    if (blob) return { blob, tipo: blob.type, candidata: c };
+  }
+  return { error: [...new Set(errores)].join('; ') || 'sin URL disponible' };
+}
+
+// ---------- captura ----------
+
+function renderConversacion(conv) {
+  const cont = $('mensajes');
+  cont.textContent = '';
+  let nAdj = 0;
+  for (const m of conv.mensajes) {
+    const div = document.createElement('div');
+    div.className = `msg ${m.rol === Core.ROL_USUARIO ? 'usuario' : 'claude'}`;
+    const rol = document.createElement('div');
+    rol.className = 'rol';
+    rol.textContent = `${m.rol} · #${m.indice}`;
+    const txt = document.createElement('div');
+    txt.textContent = m.texto.length > 1500 ? m.texto.slice(0, 1500) + '…' : m.texto;
+    div.append(rol, txt);
+    if (m.adjuntos.length) {
+      const adj = document.createElement('div');
+      adj.className = 'adj';
+      adj.textContent = m.adjuntos.map((a) => `${a.clase === 'imagen' ? '🖼️' : '📎'} ${a.nombre}`).join('  ·  ');
+      div.append(adj);
+      nAdj += m.adjuntos.length;
+    }
+    cont.append(div);
+  }
+  const u = conv.mensajes.filter((m) => m.rol === Core.ROL_USUARIO).length;
+  const imgs = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'imagen').length, 0);
+  $('resumen').textContent =
+    `${conv.mensajes.length} mensajes (${u} del usuario, ${conv.mensajes.length - u} de Claude) · ` +
+    `${imgs} imágenes · ${nAdj - imgs} documentos · origen: ${conv.origen === 'api' ? 'API de la conversación' : 'lectura del DOM'}`;
+}
+
+async function capturar() {
+  ocupado(true);
+  estado.conv = null;
+  estado.robot = [];
+  $('mensajes').textContent = '';
+  $('resumen').textContent = '';
+  $('btn-exportar').hidden = true;
+  $('btn-robot').hidden = true;
+  try {
+    const tab = await tabActiva();
+    if (!tab || !/^https:\/\/claude\.ai\//.test(tab.url || '')) {
+      throw new Error('Abre una conversación en claude.ai y vuelve a intentarlo.');
+    }
+    estado.tabId = tab.id;
+    estado.origen = new URL(tab.url).origin;
+    $('pestana').textContent = tab.title || tab.url;
+    setProgreso(0, 0);
+    setEstado('Leyendo la conversación…');
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['page-lib.js'] });
+
+    let conv = null;
+    try {
+      const r = await enPagina(tab.id, 'fetchConversationApi');
+      conv = Core.normalizarApi(r.data, { org: r.org, origin: estado.origen });
+      log(`API: ${conv.mensajes.length} mensajes en la rama activa (${conv.mensajes_en_arbol} en el árbol).`);
+    } catch (e) {
+      log(`API no disponible (${e.message}); se usa la lectura del DOM.`);
+    }
+
+    if (!conv || !conv.mensajes.length) {
+      setEstado('Cargando el historial completo (desplazando al inicio)…');
+      const s = await enPagina(tab.id, 'scrollToTop');
+      log(`Scroll: ${s.iteraciones} iteraciones.`);
+      const raw = await enPagina(tab.id, 'extractDom');
+      conv = Core.normalizarDom(raw);
+      log(`DOM: ${conv.mensajes.length} mensajes.`);
+      $('btn-robot').hidden = false;
+    }
+
+    if (!conv.mensajes.length) throw new Error('No se detectaron mensajes en la conversación.');
+    estado.conv = conv;
+    renderConversacion(conv);
+    $('btn-exportar').hidden = false;
+    setEstado(`Conversación capturada: «${conv.titulo}».`);
+  } catch (e) {
+    log(`ERROR captura: ${e.message}`);
+    setEstado(e.message, true);
+  } finally {
+    setProgreso(0, null);
+    ocupado(false);
+  }
+}
+
+async function buscarAdjuntosRobot() {
+  ocupado(true);
+  try {
+    setProgreso(0, 0);
+    setEstado('Abriendo cada adjunto para obtener su enlace… no uses la pestaña de Claude.');
+    estado.robot = await enPagina(estado.tabId, 'scanAttachments');
+    log(`Robot: ${estado.robot.length} documentos con enlace.`);
+    setEstado(estado.robot.length ? `${estado.robot.length} documentos listos para exportar.` : 'No se encontraron documentos descargables.');
+  } catch (e) {
+    log(`ERROR robot: ${e.message}`);
+    setEstado(e.message, true);
+  } finally {
+    setProgreso(0, null);
+    ocupado(false);
+  }
+}
+
+// ---------- exportación ----------
+
+function descargarBlob(blob, nombre) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombre;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
+}
+
+async function exportar() {
+  ocupado(true);
+  const conv = estado.conv;
+  const informe = [];
+  try {
+    const base = Core.nombreSeguro(conv.titulo);
+    const zip = new JSZip();
+    const raiz = zip.folder(base);
+    const usados = new Set();
+    const prefijo = (m) => `msg${String(m.indice).padStart(3, '0')}_${m.rol === Core.ROL_USUARIO ? 'usuario' : 'claude'}`;
+
+    const tareas = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.urls.length).length, 0) + estado.robot.length;
+    let hechas = 0;
+    setProgreso(0, tareas);
+
+    for (const m of conv.mensajes) {
+      for (const a of m.adjuntos) {
+        const carpeta = a.clase === 'imagen' ? 'imagenes' : 'archivos';
+        const nombreBase = Core.nombreArchivoSeguro(a.nombre, a.clase);
+
+        if (a.texto_extraido) {
+          const ruta = Core.nombreUnico(usados, `archivos/${prefijo(m)}_${nombreBase}.extraido.txt`);
+          raiz.file(ruta, a.texto_extraido);
+          a.archivo_texto = ruta;
+        }
+
+        if (!a.urls.length) {
+          if (!a.texto_extraido) {
+            a.error = 'sin enlace de descarga (solo se conoce el nombre)';
+            informe.push(`Mensaje ${m.indice}: «${a.nombre}» sin enlace de descarga.`);
+          }
+          continue;
+        }
+
+        setEstado(`Descargando ${a.nombre} (${++hechas}/${tareas})…`);
+        setProgreso(hechas, tareas);
+        const r = await descargarActivo(estado.tabId, a.urls, /\.html?$/i.test(a.nombre));
+        if (r.error) {
+          a.error = `no se pudo descargar: ${r.error}`;
+          informe.push(`Mensaje ${m.indice}: «${a.nombre}» → ${r.error}`);
+          continue;
+        }
+        let nombre = nombreBase;
+        if (!Core.tieneExtension(nombre)) {
+          const ext = Core.extDesdeMime(r.tipo);
+          if (ext) nombre += '.' + ext;
+        }
+        a.solo_vista_previa = r.candidata.calidad !== 'original' && a.clase === 'documento';
+        if (a.solo_vista_previa) {
+          nombre = nombre.replace(/(\.[A-Za-z0-9]{1,6})?$/, (e) => `_vista_previa${e || ''}`);
+          informe.push(`Mensaje ${m.indice}: «${a.nombre}» solo disponible como vista previa${a.texto_extraido ? ' (se guardó el texto extraído)' : ''}.`);
+        }
+        const ruta = Core.nombreUnico(usados, `${carpeta}/${prefijo(m)}_${nombre}`);
+        raiz.file(ruta, r.blob);
+        a.archivo = ruta;
+        a.tipo = a.tipo || r.tipo || null;
+      }
+    }
+
+    // Documentos hallados por el robot (modo DOM): no se pueden ligar a un mensaje concreto.
+    conv.archivos_sin_asignar = [];
+    for (const f of estado.robot) {
+      setEstado(`Descargando ${f.nombre} (${++hechas}/${tareas})…`);
+      setProgreso(hechas, tareas);
+      const r = await descargarActivo(estado.tabId, [{ url: f.url, calidad: 'original' }], true);
+      if (r.error) { informe.push(`Robot: «${f.nombre}» → ${r.error}`); continue; }
+      let nombre = Core.nombreArchivoSeguro(f.nombre);
+      if (!Core.tieneExtension(nombre)) { const ext = Core.extDesdeMime(r.tipo); if (ext) nombre += '.' + ext; }
+      const ruta = Core.nombreUnico(usados, `archivos/${nombre}`);
+      raiz.file(ruta, r.blob);
+      conv.archivos_sin_asignar.push({ nombre: f.nombre, archivo: ruta });
+    }
+
+    setEstado('Generando archivos…');
+    for (const art of Core.artefactosFinales(conv)) {
+      const nombre = Core.nombreArchivoSeguro(`${art.titulo || art.id}.${Core.extArtefacto(art)}`);
+      raiz.file(Core.nombreUnico(usados, `artefactos/${nombre}`), art.contenido);
+    }
+
+    const json = { exportado_en: new Date().toISOString(), version_extension: VERSION, ...conv };
+    raiz.file('conversacion.json', JSON.stringify(json, null, 2));
+    raiz.file('conversacion.md', Core.construirMarkdown(conv, { incluirRazonamiento: $('opt-razonamiento').checked }));
+
+    const nImg = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'imagen' && a.archivo).length, 0);
+    const nDoc = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'documento' && (a.archivo || a.archivo_texto)).length, 0);
+    raiz.file('informe.txt', [
+      `Exportación de «${conv.titulo}» (${new Date().toLocaleString()})`,
+      `Mensajes: ${conv.mensajes.length} · imágenes guardadas: ${nImg} · documentos guardados: ${nDoc + conv.archivos_sin_asignar.length}`,
+      `Origen de los datos: ${conv.origen}`,
+      '',
+      informe.length ? 'Incidencias:' : 'Sin incidencias.',
+      ...informe.map((l) => `- ${l}`),
+    ].join('\n'));
+
+    setEstado('Comprimiendo ZIP…');
+    setProgreso(0, 0);
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    descargarBlob(blob, `${base}.zip`);
+    informe.forEach((l) => log(`⚠️ ${l}`));
+    setEstado(informe.length ? `ZIP generado con ${informe.length} incidencia(s); revisa informe.txt.` : 'ZIP generado sin incidencias.');
+  } catch (e) {
+    log(`ERROR exportación: ${e.message}`);
+    setEstado(`Error al exportar: ${e.message}`, true);
+  } finally {
+    setProgreso(0, null);
+    ocupado(false);
+  }
+}
+
+$('btn-capturar').addEventListener('click', capturar);
+$('btn-robot').addEventListener('click', buscarAdjuntosRobot);
+$('btn-exportar').addEventListener('click', exportar);

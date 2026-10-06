@@ -1,18 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Claude Chat Viewer",
-  "version": "1.0",
-  "description": "Una extensión para leer y mostrar el contenido del chat en claude.ai",
-  "permissions": ["activeTab", "scripting", "downloads"],
-  "host_permissions": ["*://claude.ai/*", "<all_urls>"],
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "Ver Chat"
+  "name": "Exportar Chats Claude",
+  "version": "2.0.0",
+  "description": "Exporta una conversación de claude.ai (mensajes por autor, archivos e imágenes) a un ZIP con JSON y Markdown.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "sidePanel"],
+  "host_permissions": ["https://claude.ai/*"],
+  "background": {
+    "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://claude.ai/*"],
-      "js": ["content.js"]
-    }
-  ]
+  "action": {
+    "default_title": "Exportar Chats Claude"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
 }
