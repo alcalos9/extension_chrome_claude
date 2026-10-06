@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Exportar Chats Claude",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Exporta una conversación de claude.ai (mensajes por autor, archivos e imágenes) a un ZIP con JSON y Markdown.",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "scripting", "sidePanel"],
   "host_permissions": ["https://claude.ai/*"],
+  "optional_host_permissions": ["https://*/*"],
   "background": {
     "service_worker": "background.js"
   },

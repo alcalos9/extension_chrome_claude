@@ -10,6 +10,7 @@ Extensión de Chrome (Manifest V3, Chrome ≥ 116) que exporta una conversación
   archivos/           documentos originales + «.extraido.txt» con el texto que Claude leyó
   artefactos/         versión final de cada artefacto
   informe.txt         incidencias (descargas fallidas, solo vista previa, etc.)
+  debug/api_raw.json  respuesta cruda de la API (para diagnosticar cambios de formato)
 ```
 
 ## Uso

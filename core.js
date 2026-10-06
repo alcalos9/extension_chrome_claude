@@ -76,7 +76,38 @@
     try { return JSON.stringify(x, null, 2); } catch (e) { return String(x); }
   }
 
-  function bloquesDe(content) {
+  const RE_IMG_URL = /\.(?:png|jpe?g|webp|gif|avif|bmp)(?:[?#]|$)/i;
+  const CLAVES_IMG = /^(?:image_url|thumbnail_url|image|thumbnail|src|img_url|preview_url)$/i;
+
+  // Los resultados de herramientas (p. ej. búsqueda de imágenes) no tienen un esquema fijo:
+  // se recorren recursivamente buscando URLs que parezcan imágenes.
+  function extraerImagenes(nodo, origin, acc = [], vistos = new Set(), prof = 0) {
+    if (!nodo || prof > 8) return acc;
+    const agregar = (u, titulo, fuente) => {
+      const url = absUrl(u, origin);
+      if (!url || !/^https?:/i.test(url) || vistos.has(url)) return;
+      vistos.add(url);
+      acc.push({ url, titulo: titulo || null, fuente: fuente || null });
+    };
+    if (Array.isArray(nodo)) { nodo.forEach((x) => extraerImagenes(x, origin, acc, vistos, prof + 1)); return acc; }
+    if (typeof nodo !== 'object') return acc;
+    const titulo = nodo.title || nodo.alt || nodo.name || null;
+    const fuente = nodo.source_url || nodo.page_url || nodo.page || nodo.link || null;
+    if (nodo.type === 'image') {
+      const u = nodo.url || (nodo.source && nodo.source.url);
+      if (typeof u === 'string') agregar(u, titulo, fuente);
+    }
+    for (const [k, v] of Object.entries(nodo)) {
+      if (typeof v === 'string') {
+        if (CLAVES_IMG.test(k) || (k === 'url' && RE_IMG_URL.test(v))) agregar(v, titulo, fuente);
+      } else if (v && typeof v === 'object') {
+        extraerImagenes(v, origin, acc, vistos, prof + 1);
+      }
+    }
+    return acc;
+  }
+
+  function bloquesDe(content, origin) {
     if (!Array.isArray(content)) return [];
     const bloques = [];
     for (const b of content) {
@@ -98,7 +129,10 @@
           bloques.push({ tipo: 'herramienta', nombre: b.name || null, entrada: inp });
         }
       } else if (b.type === 'tool_result') {
-        bloques.push({ tipo: 'resultado_herramienta', nombre: b.name || null, texto: aTexto(b.content) });
+        bloques.push({
+          tipo: 'resultado_herramienta', nombre: b.name || null, texto: aTexto(b.content),
+          imagenes: extraerImagenes(b.content, origin),
+        });
       }
     }
     return bloques;
@@ -180,8 +214,24 @@
     return cadena.length ? cadena.reverse() : porOrden;
   }
 
+  // Imágenes devueltas por herramientas (búsqueda web, etc.) como adjuntos del mensaje.
+  function imagenesWeb(bloques) {
+    const out = [];
+    for (const b of bloques) {
+      if (b.tipo !== 'resultado_herramienta') continue;
+      for (const img of b.imagenes || []) {
+        out.push({
+          clase: 'imagen', id: null, nombre: img.titulo ? String(img.titulo).slice(0, 60) : `imagen_web_${out.length + 1}`,
+          tipo: null, tamano: null, origen: 'web', fuente: img.fuente,
+          urls: [{ url: img.url, calidad: 'original' }], texto_extraido: null,
+        });
+      }
+    }
+    return out;
+  }
+
   function normalizarMensajeApi(m, indice, origin) {
-    const bloques = bloquesDe(m.content);
+    const bloques = bloquesDe(m.content, origin);
     let texto = bloques.filter((b) => b.tipo === 'texto').map((b) => b.texto).join('\n\n').trim();
     if (!texto && typeof m.text === 'string') texto = m.text.trim();
     return {
@@ -191,7 +241,7 @@
       fecha: m.created_at || null,
       texto,
       bloques,
-      adjuntos: adjuntosDe(m, origin),
+      adjuntos: adjuntosDe(m, origin).concat(imagenesWeb(bloques)),
     };
   }
 

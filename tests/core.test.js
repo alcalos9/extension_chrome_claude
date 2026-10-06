@@ -19,6 +19,10 @@ const raw = {
     { uuid: 'm4', index: 3, sender: 'assistant', parent_message_uuid: 'm1', created_at: '2025-01-01T10:01:00Z', content: [
       { type: 'thinking', thinking: 'pienso' },
       { type: 'text', text: 'Aquí va el análisis.' },
+      { type: 'tool_result', name: 'image_search', content: [
+        { type: 'image', title: 'CX-9 plateado', url: 'https://cdn.example.com/cx9.jpg', source_url: 'https://casmiami.example/p' },
+        { type: 'text', text: 'otro', thumbnail_url: 'https://cdn.example.com/t2.png' },
+        { type: 'knowledge', url: 'https://example.com/pagina', title: 'no es imagen' }] },
       { type: 'tool_use', name: 'artifacts', input: { id: 'art1', command: 'create', type: 'application/vnd.ant.code', language: 'python', title: 'Script', content: 'print(1)' } },
       { type: 'tool_use', name: 'artifacts', input: { id: 'art1', command: 'update', old_str: '1', new_str: '2' } },
     ] },
@@ -39,6 +43,11 @@ assert.strictEqual(pdf.urls[0].calidad, 'original');
 assert.ok(pdf.urls[0].url.startsWith('https://claude.ai/api/o/files/f1/doc'));
 assert.strictEqual(adj.find((a) => a.clase === 'imagen').urls[0].calidad, 'vista_previa');
 assert.strictEqual(adj.find((a) => a.nombre === 'Pasted content').urls.length, 0);
+
+const web = conv.mensajes[1].adjuntos.filter((a) => a.origen === 'web');
+assert.strictEqual(web.length, 2, 'imágenes de resultados de herramientas, sin páginas web');
+assert.strictEqual(web[0].urls[0].url, 'https://cdn.example.com/cx9.jpg');
+assert.strictEqual(web[0].nombre, 'CX-9 plateado');
 
 const arts = Core.artefactosFinales(conv);
 assert.strictEqual(arts.length, 1);

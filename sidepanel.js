@@ -1,9 +1,9 @@
 'use strict';
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const $ = (id) => document.getElementById(id);
 
-const estado = { conv: null, tabId: null, origen: 'https://claude.ai', robot: [] };
+const estado = { conv: null, raw: null, tabId: null, origen: 'https://claude.ai', robot: [] };
 
 // ---------- utilidades de UI ----------
 
@@ -60,20 +60,38 @@ async function b64ABlob(b64, tipo) {
   return r.blob();
 }
 
+function esMismoOrigen(url) {
+  try { return new URL(url).origin === estado.origen; } catch (e) { return false; }
+}
+
+// Imágenes de búsquedas web y similares viven en otros dominios: se pide permiso solo si hace falta.
+async function permisoHostsExternos(conv) {
+  const hayExternos = conv.mensajes.some((m) => m.adjuntos.some((a) => a.urls.some((u) => /^https?:/i.test(u.url) && !esMismoOrigen(u.url))));
+  if (!hayExternos) return;
+  const origins = ['https://*/*'];
+  if (await chrome.permissions.contains({ origins })) return;
+  const ok = await chrome.permissions.request({ origins });
+  log(ok ? 'Permiso concedido para descargar imágenes de sitios externos.' : 'Permiso denegado: las imágenes externas no se descargarán.');
+}
+
 // Primero desde la página (cookies de sesión garantizadas); si falla, desde la extensión.
 async function descargarActivo(tabId, candidatas, permitirHtml) {
   const errores = [];
   for (const c of candidatas) {
     let blob = null;
-    try {
-      const r = await enPagina(tabId, 'fetchBinary', c.url);
-      if (r.ok) blob = await b64ABlob(r.b64, r.type);
-      else errores.push(r.error);
-    } catch (e) { errores.push(e.message); }
+    const mismoOrigen = esMismoOrigen(c.url);
+    if (mismoOrigen || /^(blob|data):/i.test(c.url)) {
+      try {
+        const r = await enPagina(tabId, 'fetchBinary', c.url);
+        if (r.ok) blob = await b64ABlob(r.b64, r.type);
+        else errores.push(r.error);
+      } catch (e) { errores.push(e.message); }
+    }
 
     if (!blob) {
       try {
-        const res = await fetch(c.url, { credentials: 'include' });
+        // Hosts externos: requieren el permiso opcional y no deben recibir cookies de claude.ai.
+        const res = await fetch(c.url, { credentials: mismoOrigen ? 'include' : 'omit' });
         if (res.ok) blob = await res.blob(); else errores.push(`HTTP ${res.status}`);
       } catch (e) { errores.push(e.message); }
     }
@@ -113,14 +131,16 @@ function renderConversacion(conv) {
   }
   const u = conv.mensajes.filter((m) => m.rol === Core.ROL_USUARIO).length;
   const imgs = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'imagen').length, 0);
+  const web = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.origen === 'web').length, 0);
   $('resumen').textContent =
     `${conv.mensajes.length} mensajes (${u} del usuario, ${conv.mensajes.length - u} de Claude) · ` +
-    `${imgs} imágenes · ${nAdj - imgs} documentos · origen: ${conv.origen === 'api' ? 'API de la conversación' : 'lectura del DOM'}`;
+    `${imgs} imágenes${web ? ` (${web} de la web)` : ''} · ${nAdj - imgs} documentos · origen: ${conv.origen === 'api' ? 'API de la conversación' : 'lectura del DOM'}`;
 }
 
 async function capturar() {
   ocupado(true);
   estado.conv = null;
+  estado.raw = null;
   estado.robot = [];
   $('mensajes').textContent = '';
   $('resumen').textContent = '';
@@ -141,6 +161,7 @@ async function capturar() {
     let conv = null;
     try {
       const r = await enPagina(tab.id, 'fetchConversationApi');
+      estado.raw = r.data;
       conv = Core.normalizarApi(r.data, { org: r.org, origin: estado.origen });
       log(`API: ${conv.mensajes.length} mensajes en la rama activa (${conv.mensajes_en_arbol} en el árbol).`);
     } catch (e) {
@@ -206,6 +227,7 @@ async function exportar() {
   const conv = estado.conv;
   const informe = [];
   try {
+    await permisoHostsExternos(conv); // primero: requiere el gesto del clic
     const base = Core.nombreSeguro(conv.titulo);
     const zip = new JSZip();
     const raiz = zip.folder(base);
@@ -281,6 +303,7 @@ async function exportar() {
     }
 
     const json = { exportado_en: new Date().toISOString(), version_extension: VERSION, ...conv };
+    if (estado.raw) raiz.file('debug/api_raw.json', JSON.stringify(estado.raw, null, 2));
     raiz.file('conversacion.json', JSON.stringify(json, null, 2));
     raiz.file('conversacion.md', Core.construirMarkdown(conv, { incluirRazonamiento: $('opt-razonamiento').checked }));
 
