@@ -1,6 +1,6 @@
 'use strict';
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const $ = (id) => document.getElementById(id);
 
 const estado = { conv: null, raw: null, tabId: null, origen: 'https://claude.ai', robot: [] };
@@ -222,101 +222,107 @@ function descargarBlob(blob, nombre) {
   setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
 }
 
+// Escribe en `raiz` (carpeta del ZIP) todo lo de una conversación y devuelve sus incidencias.
+async function volcarConversacion(raiz, conv, raw, { robot = [], etiqueta = '' } = {}) {
+  const informe = [];
+  const usados = new Set();
+  const prefijo = (m) => `msg${String(m.indice).padStart(3, '0')}_${m.rol === Core.ROL_USUARIO ? 'usuario' : 'claude'}`;
+
+  const tareas = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.urls.length).length, 0) + robot.length;
+  let hechas = 0;
+  setProgreso(0, tareas);
+
+  for (const m of conv.mensajes) {
+    for (const a of m.adjuntos) {
+      const carpeta = a.clase === 'imagen' ? 'imagenes' : 'archivos';
+      const nombreBase = Core.nombreArchivoSeguro(a.nombre, a.clase);
+
+      if (a.texto_extraido) {
+        const ruta = Core.nombreUnico(usados, `archivos/${prefijo(m)}_${nombreBase}.extraido.txt`);
+        raiz.file(ruta, a.texto_extraido);
+        a.archivo_texto = ruta;
+      }
+
+      if (!a.urls.length) {
+        if (!a.texto_extraido) {
+          a.error = 'sin enlace de descarga (solo se conoce el nombre)';
+          informe.push(`Mensaje ${m.indice}: «${a.nombre}» sin enlace de descarga.`);
+        }
+        continue;
+      }
+
+      setEstado(`${etiqueta}Descargando ${a.nombre} (${++hechas}/${tareas})…`);
+      setProgreso(hechas, tareas);
+      const r = await descargarActivo(estado.tabId, a.urls, /\.html?$/i.test(a.nombre));
+      if (r.error) {
+        a.error = `no se pudo descargar: ${r.error}`;
+        informe.push(`Mensaje ${m.indice}: «${a.nombre}» → ${r.error}`);
+        continue;
+      }
+      let nombre = nombreBase;
+      if (!Core.tieneExtension(nombre)) {
+        const ext = Core.extDesdeMime(r.tipo);
+        if (ext) nombre += '.' + ext;
+      }
+      a.solo_vista_previa = r.candidata.calidad !== 'original' && a.clase === 'documento';
+      if (a.solo_vista_previa) {
+        nombre = nombre.replace(/(\.[A-Za-z0-9]{1,6})?$/, (e) => `_vista_previa${e || ''}`);
+        informe.push(`Mensaje ${m.indice}: «${a.nombre}» solo disponible como vista previa${a.texto_extraido ? ' (se guardó el texto extraído)' : ''}.`);
+      }
+      const ruta = Core.nombreUnico(usados, `${carpeta}/${prefijo(m)}_${nombre}`);
+      raiz.file(ruta, r.blob);
+      a.archivo = ruta;
+      a.tipo = a.tipo || r.tipo || null;
+    }
+  }
+
+  // Documentos hallados por el robot (modo DOM): no se pueden ligar a un mensaje concreto.
+  conv.archivos_sin_asignar = [];
+  for (const f of robot) {
+    setEstado(`${etiqueta}Descargando ${f.nombre} (${++hechas}/${tareas})…`);
+    setProgreso(hechas, tareas);
+    const r = await descargarActivo(estado.tabId, [{ url: f.url, calidad: 'original' }], true);
+    if (r.error) { informe.push(`Robot: «${f.nombre}» → ${r.error}`); continue; }
+    let nombre = Core.nombreArchivoSeguro(f.nombre);
+    if (!Core.tieneExtension(nombre)) { const ext = Core.extDesdeMime(r.tipo); if (ext) nombre += '.' + ext; }
+    const ruta = Core.nombreUnico(usados, `archivos/${nombre}`);
+    raiz.file(ruta, r.blob);
+    conv.archivos_sin_asignar.push({ nombre: f.nombre, archivo: ruta });
+  }
+
+  setEstado(`${etiqueta}Generando archivos…`);
+  for (const art of Core.artefactosFinales(conv)) {
+    const nombre = Core.nombreArchivoSeguro(`${art.titulo || art.id}.${Core.extArtefacto(art)}`);
+    raiz.file(Core.nombreUnico(usados, `artefactos/${nombre}`), art.contenido);
+  }
+
+  const json = { exportado_en: new Date().toISOString(), version_extension: VERSION, ...conv };
+  if (raw) raiz.file('debug/api_raw.json', JSON.stringify(raw, null, 2));
+  raiz.file('conversacion.json', JSON.stringify(json, null, 2));
+  raiz.file('conversacion.md', Core.construirMarkdown(conv, { incluirRazonamiento: $('opt-razonamiento').checked }));
+
+  const nImg = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'imagen' && a.archivo).length, 0);
+  const nDoc = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'documento' && (a.archivo || a.archivo_texto)).length, 0);
+  raiz.file('informe.txt', [
+    `Exportación de «${conv.titulo}» (${new Date().toLocaleString()})`,
+    `Mensajes: ${conv.mensajes.length} · imágenes guardadas: ${nImg} · documentos guardados: ${nDoc + conv.archivos_sin_asignar.length}`,
+    `Origen de los datos: ${conv.origen}`,
+    '',
+    informe.length ? 'Incidencias:' : 'Sin incidencias.',
+    ...informe.map((l) => `- ${l}`),
+  ].join('\n'));
+
+  return { informe };
+}
+
 async function exportar() {
   ocupado(true);
   const conv = estado.conv;
-  const informe = [];
   try {
     await permisoHostsExternos(conv); // primero: requiere el gesto del clic
     const base = Core.nombreSeguro(conv.titulo);
     const zip = new JSZip();
-    const raiz = zip.folder(base);
-    const usados = new Set();
-    const prefijo = (m) => `msg${String(m.indice).padStart(3, '0')}_${m.rol === Core.ROL_USUARIO ? 'usuario' : 'claude'}`;
-
-    const tareas = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.urls.length).length, 0) + estado.robot.length;
-    let hechas = 0;
-    setProgreso(0, tareas);
-
-    for (const m of conv.mensajes) {
-      for (const a of m.adjuntos) {
-        const carpeta = a.clase === 'imagen' ? 'imagenes' : 'archivos';
-        const nombreBase = Core.nombreArchivoSeguro(a.nombre, a.clase);
-
-        if (a.texto_extraido) {
-          const ruta = Core.nombreUnico(usados, `archivos/${prefijo(m)}_${nombreBase}.extraido.txt`);
-          raiz.file(ruta, a.texto_extraido);
-          a.archivo_texto = ruta;
-        }
-
-        if (!a.urls.length) {
-          if (!a.texto_extraido) {
-            a.error = 'sin enlace de descarga (solo se conoce el nombre)';
-            informe.push(`Mensaje ${m.indice}: «${a.nombre}» sin enlace de descarga.`);
-          }
-          continue;
-        }
-
-        setEstado(`Descargando ${a.nombre} (${++hechas}/${tareas})…`);
-        setProgreso(hechas, tareas);
-        const r = await descargarActivo(estado.tabId, a.urls, /\.html?$/i.test(a.nombre));
-        if (r.error) {
-          a.error = `no se pudo descargar: ${r.error}`;
-          informe.push(`Mensaje ${m.indice}: «${a.nombre}» → ${r.error}`);
-          continue;
-        }
-        let nombre = nombreBase;
-        if (!Core.tieneExtension(nombre)) {
-          const ext = Core.extDesdeMime(r.tipo);
-          if (ext) nombre += '.' + ext;
-        }
-        a.solo_vista_previa = r.candidata.calidad !== 'original' && a.clase === 'documento';
-        if (a.solo_vista_previa) {
-          nombre = nombre.replace(/(\.[A-Za-z0-9]{1,6})?$/, (e) => `_vista_previa${e || ''}`);
-          informe.push(`Mensaje ${m.indice}: «${a.nombre}» solo disponible como vista previa${a.texto_extraido ? ' (se guardó el texto extraído)' : ''}.`);
-        }
-        const ruta = Core.nombreUnico(usados, `${carpeta}/${prefijo(m)}_${nombre}`);
-        raiz.file(ruta, r.blob);
-        a.archivo = ruta;
-        a.tipo = a.tipo || r.tipo || null;
-      }
-    }
-
-    // Documentos hallados por el robot (modo DOM): no se pueden ligar a un mensaje concreto.
-    conv.archivos_sin_asignar = [];
-    for (const f of estado.robot) {
-      setEstado(`Descargando ${f.nombre} (${++hechas}/${tareas})…`);
-      setProgreso(hechas, tareas);
-      const r = await descargarActivo(estado.tabId, [{ url: f.url, calidad: 'original' }], true);
-      if (r.error) { informe.push(`Robot: «${f.nombre}» → ${r.error}`); continue; }
-      let nombre = Core.nombreArchivoSeguro(f.nombre);
-      if (!Core.tieneExtension(nombre)) { const ext = Core.extDesdeMime(r.tipo); if (ext) nombre += '.' + ext; }
-      const ruta = Core.nombreUnico(usados, `archivos/${nombre}`);
-      raiz.file(ruta, r.blob);
-      conv.archivos_sin_asignar.push({ nombre: f.nombre, archivo: ruta });
-    }
-
-    setEstado('Generando archivos…');
-    for (const art of Core.artefactosFinales(conv)) {
-      const nombre = Core.nombreArchivoSeguro(`${art.titulo || art.id}.${Core.extArtefacto(art)}`);
-      raiz.file(Core.nombreUnico(usados, `artefactos/${nombre}`), art.contenido);
-    }
-
-    const json = { exportado_en: new Date().toISOString(), version_extension: VERSION, ...conv };
-    if (estado.raw) raiz.file('debug/api_raw.json', JSON.stringify(estado.raw, null, 2));
-    raiz.file('conversacion.json', JSON.stringify(json, null, 2));
-    raiz.file('conversacion.md', Core.construirMarkdown(conv, { incluirRazonamiento: $('opt-razonamiento').checked }));
-
-    const nImg = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'imagen' && a.archivo).length, 0);
-    const nDoc = conv.mensajes.reduce((n, m) => n + m.adjuntos.filter((a) => a.clase === 'documento' && (a.archivo || a.archivo_texto)).length, 0);
-    raiz.file('informe.txt', [
-      `Exportación de «${conv.titulo}» (${new Date().toLocaleString()})`,
-      `Mensajes: ${conv.mensajes.length} · imágenes guardadas: ${nImg} · documentos guardados: ${nDoc + conv.archivos_sin_asignar.length}`,
-      `Origen de los datos: ${conv.origen}`,
-      '',
-      informe.length ? 'Incidencias:' : 'Sin incidencias.',
-      ...informe.map((l) => `- ${l}`),
-    ].join('\n'));
+    const { informe } = await volcarConversacion(zip.folder(base), conv, estado.raw, { robot: estado.robot });
 
     setEstado('Comprimiendo ZIP…');
     setProgreso(0, 0);

@@ -55,20 +55,113 @@
     return ids;
   }
 
-  async function fetchConversationApi() {
-    const conv = idConversacion();
+  let orgCache = null;
+
+  async function orgActiva() {
+    if (orgCache) return orgCache;
+    const cands = await organizacionesCandidatas();
+    for (const org of cands) {
+      try { await getJson(`/api/organizations/${org}/chat_conversations?limit=1`); orgCache = org; return org; } catch (e) { /* siguiente */ }
+    }
+    if (!cands.length) throw new Error('No se encontró una organización de claude.ai.');
+    orgCache = cands[0];
+    return orgCache;
+  }
+
+  async function fetchConversationApi(id) {
+    const conv = id || idConversacion();
     if (!conv) throw new Error('La pestaña activa no es una conversación (/chat/<id>).');
     let ultimoError = null;
-    for (const org of await organizacionesCandidatas()) {
+    const cands = await organizacionesCandidatas();
+    if (orgCache) cands.sort((a, b) => (b === orgCache) - (a === orgCache));
+    for (const org of cands) {
       try {
         const data = await getJson(
           `/api/organizations/${org}/chat_conversations/${conv}?tree=True&rendering_mode=messages&render_all_tools=true`
         );
         if (!data || !Array.isArray(data.chat_messages)) throw new Error('Respuesta sin chat_messages');
+        orgCache = org;
         return { org, data };
       } catch (e) { ultimoError = e; }
     }
     throw ultimoError || new Error('No se encontró una organización válida.');
+  }
+
+  // ---------- proyectos y skills: primitivas de consulta ----------
+
+  async function consultar(urls) {
+    const errores = [];
+    for (const url of urls) {
+      try { return { url, data: await getJson(url) }; } catch (e) { errores.push(e.message); }
+    }
+    throw new Error([...new Set(errores)].join('; '));
+  }
+
+  function listaDe(data) {
+    if (Array.isArray(data)) return data;
+    if (!data || typeof data !== 'object') return [];
+    const arrays = Object.values(data).filter(Array.isArray);
+    return arrays.length ? arrays[0] : [];
+  }
+
+  // Recorre limit/offset hasta agotar resultados (tope de seguridad: 30 páginas).
+  async function listar(urlBase, limite = 100) {
+    const todos = [];
+    for (let pagina = 0; pagina < 30; pagina++) {
+      const sep = urlBase.includes('?') ? '&' : '?';
+      const data = await getJson(`${urlBase}${sep}limit=${limite}&offset=${pagina * limite}`);
+      const items = listaDe(data);
+      todos.push(...items);
+      if (items.length < limite) break;
+    }
+    return todos;
+  }
+
+  const esZip = (bytes) => bytes.length > 3 && bytes[0] === 0x50 && bytes[1] === 0x4b && (bytes[2] === 3 || bytes[2] === 5);
+
+  // Primera URL que devuelve un ZIP (por cabecera «PK»); null si ninguna.
+  async function binario(urls) {
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { credentials: 'include' });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        const bytes = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+        if (!esZip(bytes)) continue;
+        const b64 = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+          fr.onerror = () => reject(fr.error);
+          fr.readAsDataURL(blob);
+        });
+        return { url, type: blob.type, b64 };
+      } catch (e) { /* siguiente */ }
+    }
+    return null;
+  }
+
+  function forma(v, prof = 0) {
+    if (Array.isArray(v)) return v.length ? [`array(${v.length})`, forma(v[0], prof + 1)] : ['array(0)'];
+    if (v && typeof v === 'object') {
+      if (prof >= 2) return '{…}';
+      return Object.fromEntries(Object.entries(v).slice(0, 25).map(([k, x]) => [k, forma(x, prof + 1)]));
+    }
+    return typeof v;
+  }
+
+  // Para afinar endpoints: estado HTTP y *forma* (claves y tipos, nunca valores) de cada ruta.
+  async function diagnostico(urls) {
+    const out = [];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { credentials: 'include', headers: { accept: 'application/json' } });
+        const tipo = res.headers.get('content-type') || '';
+        const item = { url: url.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/gi, '<uuid>'), estado: res.status, tipo };
+        if (res.ok && /json/i.test(tipo)) item.forma = forma(await res.json());
+        out.push(item);
+      } catch (e) { out.push({ url, error: String((e && e.message) || e) }); }
+    }
+    return out;
   }
 
   // ---------- descarga binaria (con las cookies de la sesión) ----------
@@ -277,5 +370,8 @@
     return encontrados;
   }
 
-  globalThis.__EXPORTAR_CLAUDE__ = { fetchConversationApi, fetchBinary, scrollToTop, extractDom, scanAttachments };
+  globalThis.__EXPORTAR_CLAUDE__ = {
+    fetchConversationApi, fetchBinary, scrollToTop, extractDom, scanAttachments,
+    orgActiva, consultar, listar, binario, diagnostico,
+  };
 })();

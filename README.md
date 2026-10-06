@@ -13,6 +13,19 @@ Extensión de Chrome (Manifest V3, Chrome ≥ 116) que exporta una conversación
   debug/api_raw.json  respuesta cruda de la API (para diagnosticar cambios de formato)
 ```
 
+## Proyectos y skills (v2.2)
+El panel tiene tres pestañas: **Conversación**, **Proyectos** y **Skills**.
+- **Proyectos:** lista tus proyectos, eliges cuáles y exporta, por proyecto: `instrucciones.md`,
+  `conocimiento/` (documentos y archivos subidos), `proyecto.json`, `LEEME.md` y, opcionalmente, todas sus
+  conversaciones (cada una con su carpeta completa: Markdown, JSON, imágenes y archivos).
+- **Skills:** lista tus skills (los de Anthropic vienen desmarcados) y exporta cada uno como el ZIP original
+  (listo para volver a subirlo en Configuración → Capacidades) y desempaquetado (`SKILL.md` + archivos).
+- **Diagnóstico** (en «Registro y diagnóstico»): descarga `diagnostico_claude.json` con el estado HTTP y la *forma*
+  (claves y tipos, nunca contenido) de cada endpoint probado. Úsalo si una lista sale vacía o falla.
+
+Los endpoints de proyectos y skills **no son públicos**: cada operación prueba varias rutas y deja en el informe lo
+que falló. Siempre se guarda la respuesta cruda en `debug/` para poder ajustar `recursos.js`.
+
 ## Uso
 1. Instala: `chrome://extensions` → Modo desarrollador → *Cargar descomprimida* → esta carpeta.
 2. Abre una conversación en claude.ai y pulsa el icono: se abre el panel lateral.
@@ -33,7 +46,9 @@ Extensión de Chrome (Manifest V3, Chrome ≥ 116) que exporta una conversación
 | `sidepanel.*` | UI y orquestación (captura, descargas, ZIP). No se cierra al perder el foco |
 | `page-lib.js` | Se inyecta en la pestaña: API, DOM, scroll, robot, descarga con cookies. **Selectores y textos de UI en `CFG`** |
 | `core.js` | Lógica pura (normalización, Markdown, nombres) |
-| `tests/core.test.js` | `node tests/core.test.js` |
+| `recursos.js` | Lógica pura de proyectos y skills (URLs candidatas, normalización, reconstrucción de skills) |
+| `recursos-ui.js` | Pestañas, listas, exportación de proyectos/skills y diagnóstico |
+| `tests/` | `node tests/core.test.js`, `node tests/recursos.test.js`; `tests/e2e-panel.js` (requiere jsdom) |
 | `vendor/jszip.min.js` | JSZip 3.10.1 |
 
 ## Limitaciones conocidas
