@@ -1,6 +1,6 @@
 'use strict';
 
-const VERSION = '2.2.0';
+const VERSION = '2.2.1';
 const $ = (id) => document.getElementById(id);
 
 const estado = { conv: null, raw: null, tabId: null, origen: 'https://claude.ai', robot: [] };

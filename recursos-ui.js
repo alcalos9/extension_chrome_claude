@@ -240,6 +240,7 @@ async function exportarSkills() {
     const raiz = zip.folder(`skills_claude_${fechaCorta()}`);
     const carpetas = new Set();
     const indice = ['# Skills exportados', ''];
+    const vacios = [];
 
     for (let i = 0; i < elegidos.length; i++) {
       const item = elegidos[i];
@@ -272,6 +273,7 @@ async function exportarSkills() {
       const { crudo, zipB64, ...publico } = s;
       dir.file('skill.json', JSON.stringify({ exportado_en: new Date().toISOString(), ...publico }, null, 2));
       dir.file('debug/crudo.json', JSON.stringify(crudo, null, 2));
+      if (!contenido) vacios.push(s.nombre);
       indice.push(`- **${s.nombre}** (${s.tipo}) — ${contenido} archivo(s)${s.errores.length ? ' ⚠️ ' + s.errores.join('; ') : ''}`);
       s.errores.forEach((l) => global.push(`${s.nombre}: ${l}`));
     }
@@ -281,7 +283,8 @@ async function exportarSkills() {
     setProgreso(0, 0);
     descargarBlob(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), `skills_claude_${fechaCorta()}.zip`);
     global.forEach((l) => log(`⚠️ ${l}`));
-    setEstado(global.length ? `ZIP generado con ${global.length} incidencia(s); revisa INDICE.md.` : 'ZIP de skills generado sin incidencias.');
+    if (vacios.length) setEstado(`⚠️ ${vacios.length} skill(s) se guardaron SIN contenido (${vacios.slice(0, 3).join(', ')}${vacios.length > 3 ? '…' : ''}): Claude no entregó sus archivos. Revisa INDICE.md y el diagnóstico.`, true);
+    else setEstado(global.length ? `ZIP generado con ${global.length} incidencia(s); revisa INDICE.md.` : 'ZIP de skills generado sin incidencias.');
   } catch (e) {
     log(`ERROR exportando skills: ${e.message}`);
     setEstado(`Error al exportar skills: ${e.message}`, true);
