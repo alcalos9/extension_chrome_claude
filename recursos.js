@@ -192,14 +192,25 @@
       const base = `/api/organizations/${org}/skills/${encodeURIComponent(item.id)}`;
       const out = { id: item.id, nombre: item.nombre, descripcion: item.descripcion, tipo: item.tipo, zipB64: null, archivos: [], errores: [], crudo: { lista: item.raw || null } };
 
+      const enc = encodeURIComponent(item.id);
+      const plugin = item.raw && item.raw.backing_plugin_id ? encodeURIComponent(item.raw.backing_plugin_id) : null;
+      const q = `/api/organizations/${org}/skills`;
       try {
-        const bin = await ctx.binario([`${base}/download`, `${base}/download-skill`, `${base}/export`]);
+        const bin = await ctx.binario([
+          `${base}/download`, `${base}/download-skill`, `${base}/export`, `${base}/archive`,
+          `${q}/download-skill?skill_id=${enc}`, `${q}/download?skill_id=${enc}`, `${q}/export-skill?skill_id=${enc}`,
+          ...(plugin ? [`/api/organizations/${org}/plugins/${plugin}/download`, `/api/organizations/${org}/plugins/${plugin}/export`] : []),
+        ]);
         if (bin) { out.zipB64 = bin.b64; out.crudo.zip = { url: bin.url, type: bin.type }; }
       } catch (e) { out.errores.push(`descarga del ZIP: ${e.message}`); }
 
       let detalle = null;
       try {
-        const r = await ctx.consultar([base, `${base}/versions`, `${base}/files`]);
+        const r = await ctx.consultar([
+          base, `${base}/versions`, `${base}/files`, `${base}/contents`,
+          `${q}/get-skill?skill_id=${enc}`, `${q}/get-skill/${enc}`, `${q}/list-skill-files?skill_id=${enc}`,
+          ...(plugin ? [`/api/organizations/${org}/plugins/${plugin}`, `/api/organizations/${org}/plugins/${plugin}/files`] : []),
+        ]);
         detalle = r.data;
         out.crudo.detalle = r.data;
       } catch (e) { if (!out.zipB64) out.errores.push(`detalle del skill: ${e.message}`); }
@@ -240,7 +251,7 @@
     }
     if (skillId) {
       const b = `/api/organizations/${org}/skills/${encodeURIComponent(skillId)}`;
-      urls.push(b, `${b}/versions`, `${b}/files`, `${b}/download`);
+      urls.push(b, `${b}/versions`, `${b}/files`, `${b}/download`, `${b}/contents`, `/api/organizations/${org}/skills/get-skill?skill_id=${encodeURIComponent(skillId)}`, `/api/organizations/${org}/skills/download-skill?skill_id=${encodeURIComponent(skillId)}`);
     }
     return urls;
   }
